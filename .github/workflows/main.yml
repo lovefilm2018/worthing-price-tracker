@@ -25,6 +25,10 @@ jobs:
           playwright install chromium --with-deps
 
       - name: Run Scraper
+        env:
+          UK_PROXY_SERVER: ${{ secrets.UK_PROXY_SERVER }}
+          UK_PROXY_USERNAME: ${{ secrets.UK_PROXY_USERNAME }}
+          UK_PROXY_PASSWORD: ${{ secrets.UK_PROXY_PASSWORD }}
         run: python scraper.py
 
       # Upload the dumped card HTML files as a downloadable zip artifact
