@@ -1,5 +1,4 @@
 import time
-import re
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
@@ -18,7 +17,7 @@ def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15"):
     )
 
     print("==================================================")
-    print(" WORTHING PRICE TRACKER — GROSS PRICE CHECK (INCL TAX)")
+    print(" WORTHING PRICE TRACKER — LIVE SEARCH")
     print(f" Check-in : {checkin_date}")
     print(f" Check-out: {checkout_date}")
     print("==================================================\n")
@@ -41,7 +40,7 @@ def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15"):
         print("Navigating to Booking.com search page...")
         page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # Pause 3 seconds for client-side tax overlay scripts to complete
+        # Wait 3 seconds for price numbers to fully settle
         time.sleep(3)
         
         page.wait_for_selector("div[data-testid='property-card']", timeout=30000)
@@ -56,29 +55,17 @@ def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15"):
         return
 
     print(f"✅ Successfully retrieved {len(cards)} nearby properties!\n")
-    print(f"{'#':<3} | {'Property Name':<45} | {'Gross Price (Incl Tax)':<20}")
-    print("-" * 75)
+    print(f"{'#':<3} | {'Property Name':<45} | {'Displayed Price':<15}")
+    print("-" * 70)
 
     for idx, card in enumerate(cards, start=1):
         title_elem = card.find("div", {"data-testid": "title"})
-        
-        # Target the final gross price container (including VAT and fees)
         price_elem = card.find("span", {"data-testid": "price-and-discounted-price"})
-        if not price_elem:
-            price_elem = card.find("div", {"data-testid": "price-and-discounted-price"})
-
-        # Fallback to secondary price text if main span is net
-        price_container = card.find("div", {"data-testid": "availability-rate-information"})
         
         title = title_elem.text.strip() if title_elem else "Unknown Property"
-        
-        raw_text = price_container.text.strip() if price_container else (price_elem.text.strip() if price_elem else "N/A")
-        
-        # Find all currency values and take the last/highest (which is the final tax-inclusive price)
-        matches = re.findall(r'£[\d,]+', raw_text)
-        price = matches[-1] if matches else "N/A"
+        price = price_elem.text.strip() if price_elem else "N/A"
 
-        print(f"{idx:<3} | {title[:45]:<45} | {price:<20}")
+        print(f"{idx:<3} | {title[:45]:<45} | {price:<15}")
 
     print("\n==================================================")
     print(" SCRAPE COMPLETED SUCCESSFULLY")
