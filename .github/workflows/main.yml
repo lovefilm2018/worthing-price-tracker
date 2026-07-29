@@ -26,3 +26,11 @@ jobs:
 
       - name: Run Scraper
         run: python scraper.py
+
+      # Upload the dumped card HTML files as a downloadable zip artifact
+      - name: Upload Debug Card Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-cards-html
+          path: debug_cards/
