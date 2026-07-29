@@ -5,6 +5,8 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 DEBUG_DIR = "debug_cards"
+PRICE_RE = re.compile(r"£[\d,]+")
+
 
 def _wait_for_stable_prices(page, selector="div[data-testid='property-card']", checks=4, interval=1.5, max_wait=20):
     last_snapshot = None
@@ -24,53 +26,51 @@ def _wait_for_stable_prices(page, selector="div[data-testid='property-card']", c
         time.sleep(interval)
         elapsed += interval
 
-def _extract_gross_price(card, idx, debug=True):
-    TAX_LABEL_RE = re.compile(r"includes taxes and charges", re.I)
-    PRICE_RE = re.compile(r"£[\d,]+")
-
-    price_container = card.find("div", {"data-testid": "price-and-discounted-price"})
-    rate_info = card.find("div", {"data-testid": "availability-rate-information"})
-    search_scope = price_container or rate_info or card
-
-    if debug:
-        os.makedirs(DEBUG_DIR, exist_ok=True)
-        with open(os.path.join(DEBUG_DIR, f"card_{idx}.html"), "w", encoding="utf-8") as f:
-            f.write(card.prettify())
-
-    label_elem = search_scope.find(string=TAX_LABEL_RE)
-    if label_elem:
-        anchor = label_elem.parent
-        for _ in range(3):
-            if anchor is None:
-                break
-            text = anchor.get_text(" ", strip=True)
-            matches = PRICE_RE.findall(text)
-            if matches:
-                return _max_price(matches), "anchor"
-            anchor = anchor.parent
-
-    if price_container:
-        matches = PRICE_RE.findall(price_container.get_text(" ", strip=True))
-        if matches:
-            return _max_price(matches), "container-max"
-
-    if rate_info:
-        matches = PRICE_RE.findall(rate_info.get_text(" ", strip=True))
-        if matches:
-            return _max_price(matches), "rate-info-max"
-
-    span_elem = card.find("span", {"data-testid": "price-and-discounted-price"})
-    if span_elem:
-        matches = PRICE_RE.findall(span_elem.get_text(" ", strip=True))
-        if matches:
-            return _max_price(matches), "span-fallback"
-
-    return "N/A", "none"
 
 def _max_price(price_strings):
     def to_int(p):
         return int(p.replace("£", "").replace(",", ""))
     return max(price_strings, key=to_int)
+
+
+def _extract_visible_price_text(page, card_index, selector="div[data-testid='property-card']"):
+    """
+    Return the innerText of whichever price block is actually rendered/visible
+    for this card. Booking.com cards can contain more than one price node
+    (e.g. an alternate rate-plan panel hidden via CSS) — is_visible() checks
+    real computed layout, so this only ever returns what a human would see.
+    """
+    card = page.locator(selector).nth(card_index)
+
+    price_nodes = card.locator("div[data-testid='price-and-discounted-price']")
+    for i in range(price_nodes.count()):
+        node = price_nodes.nth(i)
+        if node.is_visible():
+            return node.inner_text()
+
+    rate_nodes = card.locator("div[data-testid='availability-rate-information']")
+    for i in range(rate_nodes.count()):
+        node = rate_nodes.nth(i)
+        if node.is_visible():
+            return node.inner_text()
+
+    span_nodes = card.locator("span[data-testid='price-and-discounted-price']")
+    for i in range(span_nodes.count()):
+        node = span_nodes.nth(i)
+        if node.is_visible():
+            return node.inner_text()
+
+    return None
+
+
+def _extract_gross_price_from_text(text, source_label):
+    if not text:
+        return "N/A", "none"
+    matches = PRICE_RE.findall(text)
+    if matches:
+        return _max_price(matches), source_label
+    return "N/A", "none"
+
 
 def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15", debug=True,
                      proxy_server=None, proxy_username=None, proxy_password=None):
@@ -124,6 +124,7 @@ def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15", debug
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             locale="en-GB",
             timezone_id="Europe/London",
+            viewport={"width": 1280, "height": 900},
             extra_http_headers={
                 "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
                 "sec-ch-ua-platform": '"Windows"',
@@ -147,6 +148,15 @@ def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15", debug
             pass
 
         _wait_for_stable_prices(page)
+
+        # --- Capture VISIBLE price text per card while the browser is still live.
+        # This is the key fix: is_visible() reflects real computed layout, which
+        # static HTML (page.content() parsed later with BeautifulSoup) cannot tell you.
+        card_count = page.locator("div[data-testid='property-card']").count()
+        visible_price_texts = []
+        for i in range(card_count):
+            visible_price_texts.append(_extract_visible_price_text(page, i))
+
         html_content = page.content()
         browser.close()
 
@@ -157,6 +167,9 @@ def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15", debug
         print("⚠️ No property cards found.", flush=True)
         return
 
+    if debug:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+
     print(f"✅ Successfully retrieved {len(cards)} nearby properties!\n", flush=True)
     print(f"{'#':<3} | {'Property Name':<40} | {'Price':<10} | {'Source':<14}", flush=True)
     print("-" * 75, flush=True)
@@ -164,12 +177,20 @@ def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15", debug
     for idx, card in enumerate(cards, start=1):
         title_elem = card.find("div", {"data-testid": "title"})
         title = title_elem.text.strip() if title_elem else "Unknown Property"
-        price, source = _extract_gross_price(card, idx, debug=debug)
+
+        if debug:
+            with open(os.path.join(DEBUG_DIR, f"card_{idx}.html"), "w", encoding="utf-8") as f:
+                f.write(card.prettify())
+
+        visible_text = visible_price_texts[idx - 1] if idx - 1 < len(visible_price_texts) else None
+        price, source = _extract_gross_price_from_text(visible_text, "visible-node")
+
         print(f"{idx:<3} | {title[:40]:<40} | {price:<10} | {source:<14}", flush=True)
 
     print("\n==================================================", flush=True)
     print(" SCRAPE COMPLETED SUCCESSFULLY", flush=True)
     print("==================================================", flush=True)
+
 
 if __name__ == "__main__":
     run_price_check(
