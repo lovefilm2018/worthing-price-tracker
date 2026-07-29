@@ -1,8 +1,10 @@
 import time
+import re
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-def run_price_check(checkin_date="2026-11-11", checkout_date="2026-11-13"):
+def run_price_check(checkin_date="2026-11-14", checkout_date="2026-11-15"):
+    # Clean 1-night search URL anchored directly to Heene Place (BN11 3NL)
     url = (
         "https://www.booking.com/searchresults.en-gb.html?"
         "ss=BN11+3NL&"
@@ -17,13 +19,12 @@ def run_price_check(checkin_date="2026-11-11", checkout_date="2026-11-13"):
     )
 
     print("==================================================")
-    print(" WORTHING PRICE TRACKER — RUNNING PLAYWRIGHT SEARCH")
+    print(" WORTHING PRICE TRACKER — 1-NIGHT TEST RUN")
     print(f" Check-in : {checkin_date}")
     print(f" Check-out: {checkout_date}")
     print("==================================================\n")
 
     with sync_playwright() as p:
-        # Launch headless Chromium with standard browser fingerprinting
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -39,9 +40,11 @@ def run_price_check(checkin_date="2026-11-11", checkout_date="2026-11-13"):
         page = context.new_page()
 
         print("Navigating to Booking.com search page...")
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # Wait for property card elements to render in the DOM
+        # Give client-side JS 2 seconds to complete price rendering
+        time.sleep(2)
+        
         page.wait_for_selector("div[data-testid='property-card']", timeout=30000)
         html_content = page.content()
         browser.close()
@@ -54,15 +57,23 @@ def run_price_check(checkin_date="2026-11-11", checkout_date="2026-11-13"):
         return
 
     print(f"✅ Successfully retrieved {len(cards)} nearby properties!\n")
-    print(f"{'#':<3} | {'Property Name':<45} | {'Public Base Price':<15}")
+    print(f"{'#':<3} | {'Property Name':<45} | {'1-Night Price':<15}")
     print("-" * 70)
 
     for idx, card in enumerate(cards, start=1):
         title_elem = card.find("div", {"data-testid": "title"})
-        price_elem = card.find("span", {"data-testid": "price-and-discounted-price"})
         
+        # Target the full displayed price element
+        price_container = card.find("div", {"data-testid": "price-and-discounted-price"})
+        if not price_container:
+            price_container = card.find("span", {"data-testid": "price-and-discounted-price"})
+            
         title = title_elem.text.strip() if title_elem else "Unknown Property"
-        price = price_elem.text.strip() if price_elem else "N/A"
+        price_text = price_container.text.strip() if price_container else "N/A"
+        
+        # Extract clean currency string (e.g. £135)
+        match = re.search(r'£[\d,]+', price_text)
+        price = match.group(0) if match else price_text
 
         print(f"{idx:<3} | {title[:45]:<45} | {price:<15}")
 
